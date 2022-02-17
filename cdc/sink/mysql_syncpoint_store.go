@@ -23,7 +23,6 @@ import (
 	dmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/pkg/cyclic/mark"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/pkg/util"
@@ -31,7 +30,10 @@ import (
 )
 
 // SyncpointTableName is the name of table where all syncpoint maps sit
-const syncpointTableName string = "syncpoint_v1"
+const (
+	SyncpointDatabaseName string = "tidb_cdc"
+	SyncpointTableName    string = "syncpoint_v1"
+)
 
 type mysqlSyncpointStore struct {
 	db *sql.DB
@@ -134,7 +136,7 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL) (S
 }
 
 func (s *mysqlSyncpointStore) CreateSynctable(ctx context.Context) error {
-	database := mark.SchemaName
+	database := SyncpointDatabaseName
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		log.Error("create sync table: begin Tx fail", zap.Error(err))
@@ -156,7 +158,7 @@ func (s *mysqlSyncpointStore) CreateSynctable(ctx context.Context) error {
 		}
 		return cerror.WrapError(cerror.ErrMySQLTxnError, err)
 	}
-	_, err = tx.Exec("CREATE TABLE  IF NOT EXISTS " + syncpointTableName + " (cf varchar(255),primary_ts varchar(18),secondary_ts varchar(18),PRIMARY KEY ( `cf`, `primary_ts` ) )")
+	_, err = tx.Exec("CREATE TABLE  IF NOT EXISTS " + SyncpointTableName + " (cf varchar(255),primary_ts varchar(18),secondary_ts varchar(18), result int, PRIMARY KEY ( `cf`, `primary_ts` ) )")
 	if err != nil {
 		err2 := tx.Rollback()
 		if err2 != nil {
@@ -185,7 +187,7 @@ func (s *mysqlSyncpointStore) SinkSyncpoint(ctx context.Context, id string, chec
 		}
 		return cerror.WrapError(cerror.ErrMySQLTxnError, err)
 	}
-	_, err = tx.Exec("insert ignore into "+mark.SchemaName+"."+syncpointTableName+"(cf, primary_ts, secondary_ts) VALUES (?,?,?)", id, checkpointTs, secondaryTs)
+	_, err = tx.Exec("insert ignore into "+SyncpointDatabaseName+"."+SyncpointTableName+"(cf, primary_ts, secondary_ts, result) VALUES (?,?,?,?)", id, checkpointTs, secondaryTs, 0)
 	if err != nil {
 		err2 := tx.Rollback()
 		if err2 != nil {
