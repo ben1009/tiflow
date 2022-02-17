@@ -117,7 +117,7 @@ func (v *TiDBVerification) Verify(ctx context.Context) (map[string]*TimeRange, e
 	for _, t := range tsList {
 		t1 := t
 		for t1.result == unchecked {
-			ret, err := v.checkSum(ctx, t1)
+			ret, err := v.checkConsistency(ctx, t1)
 			if err != nil {
 				return nil, err
 			}
@@ -128,7 +128,7 @@ func (v *TiDBVerification) Verify(ctx context.Context) (map[string]*TimeRange, e
 			}
 			err = v.updateCheckResult(ctx, t1, checkRet)
 			if err != nil {
-				return nil, cerror.WrapError(cerror.ErrMySQLTxnError, err)
+				return nil, err
 			}
 
 			// if pass no need to run module check, if run from previous set startTs
@@ -161,7 +161,7 @@ func (v *TiDBVerification) Verify(ctx context.Context) (map[string]*TimeRange, e
 	return rets, nil
 }
 
-func (v *TiDBVerification) checkSum(ctx context.Context, t *tsPair) (bool, error) {
+func (v *TiDBVerification) checkConsistency(ctx context.Context, t *tsPair) (bool, error) {
 	err := setSnapshot(ctx, v.upstreamChecker.db, t.primaryTs)
 	if err != nil {
 		return false, err
