@@ -174,7 +174,7 @@ func (v *TiDBVerification) checkSum(ctx context.Context, t *tsPair) (bool, error
 		zap.String("primaryTs", t.primaryTs),
 		zap.String("secondaryTs", t.secondaryTs),
 		zap.String("changefeed", t.cf))
-	return compareCRC32CheckSum(ctx, v.upstreamChecker, v.downstreamChecker, v.config.Filter)
+	return compareCheckSum(ctx, v.upstreamChecker, v.downstreamChecker, v.config.Filter)
 }
 
 func (v *TiDBVerification) updateCheckResult(ctx context.Context, t *tsPair, checkRet int) error {

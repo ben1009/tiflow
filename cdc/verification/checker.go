@@ -150,23 +150,23 @@ func (c *checker) doChecksum(ctx context.Context, columns []columnInfo, tableNam
 }
 
 // TODO: use ADMIN CHECKSUM TABLE for tidb if needed
-func compareCRC32CheckSum(ctx context.Context, upstreamChecker, downstreamChecker checkSumChecker, f *filter.Filter) (bool, error) {
-	sourceCRC32, err := upstreamChecker.getCheckSum(ctx, f)
+func compareCheckSum(ctx context.Context, upstreamChecker, downstreamChecker checkSumChecker, f *filter.Filter) (bool, error) {
+	sourceCheckSum, err := upstreamChecker.getCheckSum(ctx, f)
 	if err != nil {
 		return false, err
 	}
 
-	sinkCRC32, err := downstreamChecker.getCheckSum(ctx, f)
+	sinkCheckSum, err := downstreamChecker.getCheckSum(ctx, f)
 	if err != nil {
 		return false, err
 	}
 
-	if len(sourceCRC32) != len(sinkCRC32) {
-		log.Warn("source and sink have different checker size", zap.Reflect("source", sourceCRC32), zap.Reflect("sink", sinkCRC32))
+	if len(sourceCheckSum) != len(sinkCheckSum) {
+		log.Warn("source and sink have different checker size", zap.Reflect("source", sourceCheckSum), zap.Reflect("sink", sinkCheckSum))
 	}
 
-	for k, v := range sourceCRC32 {
-		target, ok := sinkCRC32[k]
+	for k, v := range sourceCheckSum {
+		target, ok := sinkCheckSum[k]
 		if !ok {
 			log.Warn("cannot find checker at sink, it may eligible to replicate", zap.String("tableName", k), zap.String("source checker", v))
 			continue
