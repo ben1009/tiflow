@@ -205,7 +205,7 @@ func verifyUpdateChangefeedConfig(ctx context.Context, changefeedConfig model.Ch
 }
 
 func verifyTables(replicaConfig *config.ReplicaConfig, storage tidbkv.Storage, startTs uint64) (ineligibleTables, eligibleTables []model.TableName, err error) {
-	filter, err := filter.NewFilter(replicaConfig)
+	f, err := filter.NewFilter(replicaConfig)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
@@ -219,7 +219,7 @@ func verifyTables(replicaConfig *config.ReplicaConfig, storage tidbkv.Storage, s
 	}
 
 	for _, tableInfo := range snap.Tables() {
-		if filter.ShouldIgnoreTable(tableInfo.TableName.Schema, tableInfo.TableName.Table) {
+		if f.ShouldIgnoreTable(tableInfo.TableName.Schema, tableInfo.TableName.Table) {
 			continue
 		}
 		if !tableInfo.IsEligible(false /* forceReplicate */) {

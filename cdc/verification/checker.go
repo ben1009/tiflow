@@ -26,28 +26,30 @@ import (
 )
 
 type checkSumChecker interface {
-	getCheckSum(ctx context.Context, f *filter.Filter) (map[string]string, error)
-	getAllTables(ctx context.Context, f *filter.Filter) ([]string, error)
+	getCheckSum(ctx context.Context, db string, f *filter.Filter) (map[string]string, error)
+	getAllDBs(ctx context.Context) ([]string, error)
+	getAllTables(ctx context.Context, db string, f *filter.Filter) ([]string, error)
 	getColumns(ctx context.Context, tableName string) ([]columnInfo, error)
 	doChecksum(ctx context.Context, columns []columnInfo, tableName string) (string, error)
 }
 
 type checker struct {
-	db     *sql.DB
-	dbName string
+	db *sql.DB
 }
 
-// newChecker return a checker instance, which can be used to get checker checksum
-func newChecker(db *sql.DB, dbName string) *checker {
+func newChecker(db *sql.DB) *checker {
 	return &checker{
-		db:     db,
-		dbName: dbName,
+		db: db,
 	}
 }
 
-// GetCheckSum get checker checksum for each table in the given database
-func (c *checker) getCheckSum(ctx context.Context, f *filter.Filter) (map[string]string, error) {
-	tables, err := c.getAllTables(ctx, f)
+func (c *checker) getCheckSum(ctx context.Context, db string, f *filter.Filter) (map[string]string, error) {
+	_, err := c.db.ExecContext(ctx, fmt.Sprintf("USE %s", db))
+	if err != nil {
+		return nil, cerror.WrapError(cerror.ErrMySQLQueryError, err)
+	}
+
+	tables, err := c.getAllTables(ctx, db, f)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +70,31 @@ func (c *checker) getCheckSum(ctx context.Context, f *filter.Filter) (map[string
 	return result, nil
 }
 
-func (c *checker) getAllTables(ctx context.Context, f *filter.Filter) ([]string, error) {
+func (c *checker) getAllDBs(ctx context.Context) ([]string, error) {
+	rows, err := c.db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return nil, cerror.WrapError(cerror.ErrMySQLQueryError, err)
+	}
+	defer func() {
+		if err = rows.Close(); err != nil {
+			log.Error("getAllDBs close rows failed", zap.Error(err))
+		}
+	}()
+
+	dbs := []string{}
+	for rows.Next() {
+		var d string
+		if err = rows.Scan(&d); err != nil {
+			return dbs, cerror.WrapError(cerror.ErrMySQLQueryError, err)
+		}
+
+		dbs = append(dbs, d)
+	}
+
+	return dbs, nil
+}
+
+func (c *checker) getAllTables(ctx context.Context, db string, f *filter.Filter) ([]string, error) {
 	rows, err := c.db.QueryContext(ctx, "SHOW TABLES")
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrMySQLQueryError, err)
@@ -85,7 +111,7 @@ func (c *checker) getAllTables(ctx context.Context, f *filter.Filter) ([]string,
 		if err = rows.Scan(&t); err != nil {
 			return tables, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 		}
-		if f.ShouldIgnoreTable(c.dbName, t) {
+		if f.ShouldIgnoreTable(db, t) {
 			continue
 		}
 		tables = append(tables, t)
@@ -151,29 +177,36 @@ func (c *checker) doChecksum(ctx context.Context, columns []columnInfo, tableNam
 
 // TODO: use ADMIN CHECKSUM TABLE for tidb if needed
 func compareCheckSum(ctx context.Context, upstreamChecker, downstreamChecker checkSumChecker, f *filter.Filter) (bool, error) {
-	sourceCheckSum, err := upstreamChecker.getCheckSum(ctx, f)
+	dbs, err := upstreamChecker.getAllDBs(ctx)
 	if err != nil {
 		return false, err
 	}
 
-	sinkCheckSum, err := downstreamChecker.getCheckSum(ctx, f)
-	if err != nil {
-		return false, err
-	}
-
-	if len(sourceCheckSum) != len(sinkCheckSum) {
-		log.Warn("source and sink have different checker size", zap.Reflect("source", sourceCheckSum), zap.Reflect("sink", sinkCheckSum))
-	}
-
-	for k, v := range sourceCheckSum {
-		target, ok := sinkCheckSum[k]
-		if !ok {
-			log.Warn("cannot find checker at sink, it may eligible to replicate", zap.String("tableName", k), zap.String("source checker", v))
-			continue
+	for _, db := range dbs {
+		sourceCheckSum, err := upstreamChecker.getCheckSum(ctx, db, f)
+		if err != nil {
+			return false, err
 		}
-		if v != target {
-			log.Error("checker mismatch", zap.String("source", v), zap.String("sink", target))
-			return false, nil
+
+		sinkCheckSum, err := downstreamChecker.getCheckSum(ctx, db, f)
+		if err != nil {
+			return false, err
+		}
+
+		if len(sourceCheckSum) != len(sinkCheckSum) {
+			log.Warn("source and sink have different checker size", zap.Any("source", sourceCheckSum), zap.Any("sink", sinkCheckSum))
+		}
+
+		for k, v := range sourceCheckSum {
+			target, ok := sinkCheckSum[k]
+			if !ok {
+				log.Warn("cannot find checker at sink, it may eligible to replicate", zap.String("tableName", k), zap.String("source checker", v))
+				continue
+			}
+			if v != target {
+				log.Error("checker mismatch", zap.String("source", v), zap.String("sink", target))
+				return false, nil
+			}
 		}
 	}
 	return true, nil

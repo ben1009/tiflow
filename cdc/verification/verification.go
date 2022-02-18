@@ -34,9 +34,8 @@ type Verifier interface {
 type Config struct {
 	CheckIntervalInSec int
 	ResourceLimitation string
-	UpstreamDSN        string //with dbname ?
+	UpstreamDSN        string
 	DownStreamDSN      string
-	DBName             string
 	Filter             *filter.Filter
 }
 
@@ -71,8 +70,8 @@ func NewVerification(ctx context.Context, config *Config) (*TiDBVerification, er
 	}
 	v := &TiDBVerification{
 		config:            config,
-		upstreamChecker:   newChecker(upstreamDB, config.DBName),
-		downstreamChecker: newChecker(downstreamDB, config.DBName),
+		upstreamChecker:   newChecker(upstreamDB),
+		downstreamChecker: newChecker(downstreamDB),
 	}
 	go v.runVerify(ctx)
 
@@ -99,7 +98,7 @@ func (v *TiDBVerification) runVerify(ctx context.Context) {
 		// resource limitation cancel https://www.percona.com/doc/percona-toolkit/LATEST/pt-table-checksum.html
 		_, err := v.Verify(ctx)
 		if err != nil {
-			log.Error("runVerify fail", zap.Error(err))
+			log.Warn("runVerify fail", zap.Error(err))
 		}
 
 		// TODO: module level check
@@ -183,7 +182,7 @@ func (v *TiDBVerification) updateCheckResult(ctx context.Context, t *tsPair, che
 		return cerror.WrapError(cerror.ErrMySQLTxnError, err)
 	}
 
-	_, err = tx.ExecContext(ctx, fmt.Sprintf("update %s set result=%d where primary_ts=%s and secondary_ts=%s and cf=%s", sink.SyncpointTableName, checkRet, t.primaryTs, t.secondaryTs, t.cf))
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("update %s.%s set result=%d where primary_ts=%s and secondary_ts=%s and cf=%s", sink.SyncpointDatabaseName, sink.SyncpointTableName, checkRet, t.primaryTs, t.secondaryTs, t.cf))
 	if err != nil {
 		errR := tx.Rollback()
 		if errR != nil {
@@ -221,7 +220,7 @@ type tsPair struct {
 
 func (v *TiDBVerification) getPreviousTS(ctx context.Context, cf, pts string) (*tsPair, error) {
 	var t *tsPair
-	row := v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select cf, promary_ts, secondary_ts, result from %s where cf=%s and primary_ts<%s order by primary_ts desc limit 1", sink.SyncpointTableName, cf, pts))
+	row := v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select cf, promary_ts, secondary_ts, result from %s.%s where cf=%s and primary_ts<%s order by primary_ts desc limit 1", sink.SyncpointDatabaseName, sink.SyncpointTableName, cf, pts))
 	if row.Err() != nil {
 		return t, cerror.WrapError(cerror.ErrMySQLQueryError, row.Err())
 	}
@@ -234,7 +233,7 @@ func (v *TiDBVerification) getPreviousTS(ctx context.Context, cf, pts string) (*
 
 func (v *TiDBVerification) getTS(ctx context.Context) ([]*tsPair, error) {
 	ts := []*tsPair{}
-	rows, err := v.upstreamChecker.db.QueryContext(ctx, fmt.Sprintf("select max(primary_ts), cf from %s group by cf", sink.SyncpointDatabaseName))
+	rows, err := v.upstreamChecker.db.QueryContext(ctx, fmt.Sprintf("select max(primary_ts), cf from %s.%s group by cf", sink.SyncpointDatabaseName, sink.SyncpointTableName))
 	if err != nil {
 		return ts, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 	}
@@ -254,7 +253,7 @@ func (v *TiDBVerification) getTS(ctx context.Context) ([]*tsPair, error) {
 	}
 
 	for cf, pts := range maxTsList {
-		row := v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select cf, promary_ts, secondary_ts, result from %s where cf=%s and primary_ts=%s", sink.SyncpointTableName, cf, pts))
+		row := v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select cf, promary_ts, secondary_ts, result from %s.%s where cf=%s and primary_ts=%s", sink.SyncpointDatabaseName, sink.SyncpointTableName, cf, pts))
 		if row.Err() != nil {
 			return ts, cerror.WrapError(cerror.ErrMySQLQueryError, row.Err())
 		}
