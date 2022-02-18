@@ -29,8 +29,8 @@ type checkSumChecker interface {
 	getCheckSum(ctx context.Context, db string, f *filter.Filter) (map[string]string, error)
 	getAllDBs(ctx context.Context) ([]string, error)
 	getAllTables(ctx context.Context, db string, f *filter.Filter) ([]string, error)
-	getColumns(ctx context.Context, tableName string) ([]columnInfo, error)
-	doChecksum(ctx context.Context, columns []columnInfo, tableName string) (string, error)
+	getColumns(ctx context.Context, databaseName, tableName string) ([]columnInfo, error)
+	doChecksum(ctx context.Context, columns []columnInfo, databaseName, tableName string) (string, error)
 }
 
 type checker struct {
@@ -44,11 +44,6 @@ func newChecker(db *sql.DB) *checker {
 }
 
 func (c *checker) getCheckSum(ctx context.Context, db string, f *filter.Filter) (map[string]string, error) {
-	_, err := c.db.ExecContext(ctx, fmt.Sprintf("USE %s", db))
-	if err != nil {
-		return nil, cerror.WrapError(cerror.ErrMySQLQueryError, err)
-	}
-
 	tables, err := c.getAllTables(ctx, db, f)
 	if err != nil {
 		return nil, err
@@ -56,11 +51,11 @@ func (c *checker) getCheckSum(ctx context.Context, db string, f *filter.Filter) 
 
 	result := make(map[string]string)
 	for _, table := range tables {
-		columns, err := c.getColumns(ctx, table)
+		columns, err := c.getColumns(ctx, db, table)
 		if err != nil {
 			return result, err
 		}
-		checkSum, err := c.doChecksum(ctx, columns, table)
+		checkSum, err := c.doChecksum(ctx, columns, db, table)
 		if err != nil {
 			return result, err
 		}
@@ -95,7 +90,7 @@ func (c *checker) getAllDBs(ctx context.Context) ([]string, error) {
 }
 
 func (c *checker) getAllTables(ctx context.Context, db string, f *filter.Filter) ([]string, error) {
-	rows, err := c.db.QueryContext(ctx, "SHOW TABLES")
+	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("SHOW TABLES from %s", db))
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 	}
@@ -129,8 +124,8 @@ type columnInfo struct {
 	Extra   string
 }
 
-func (c *checker) getColumns(ctx context.Context, tableName string) ([]columnInfo, error) {
-	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("SHOW COLUMNS FROM %s", tableName))
+func (c *checker) getColumns(ctx context.Context, databaseName, tableName string) ([]columnInfo, error) {
+	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("SHOW COLUMNS FROM %s.%s", databaseName, tableName))
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 	}
@@ -152,7 +147,7 @@ func (c *checker) getColumns(ctx context.Context, tableName string) ([]columnInf
 	return result, nil
 }
 
-func (c *checker) doChecksum(ctx context.Context, columns []columnInfo, tableName string) (string, error) {
+func (c *checker) doChecksum(ctx context.Context, columns []columnInfo, databaseName, tableName string) (string, error) {
 	var columnNames, isNull []string
 	for _, item := range columns {
 		columnNames = append(columnNames, item.Field)
@@ -167,9 +162,9 @@ func (c *checker) doChecksum(ctx context.Context, columns []columnInfo, tableNam
 	// ref: https://www.percona.com/doc/percona-toolkit/LATEST/pt-table-checksum.html
 	// TODO: hash function as a option
 	concat := fmt.Sprintf("CONCAT_WS(',', %s, %s)", a, b)
-	query := fmt.Sprintf("SELECT BIT_XOR(CAST(checker(%s) AS UNSIGNED)) AS checksum FROM %s", concat, tableName)
+	query := fmt.Sprintf("SELECT BIT_XOR(CAST(checker(%s) AS UNSIGNED)) AS checksum FROM %s.%s", concat, databaseName, tableName)
 
-	log.Debug("do checkSum", zap.String("table", tableName), zap.String("query", query))
+	log.Debug("do checkSum", zap.String("db", databaseName), zap.String("table", tableName), zap.String("query", query))
 	var checkSum string
 	err := c.db.QueryRowContext(ctx, query).Scan(&checkSum)
 	return checkSum, cerror.WrapError(cerror.ErrMySQLQueryError, err)
