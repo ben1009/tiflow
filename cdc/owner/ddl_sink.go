@@ -99,7 +99,7 @@ func ddlSinkInitializer(ctx cdcContext.Context, a *ddlSinkImpl, id model.ChangeF
 	if !info.SyncPointEnabled {
 		return nil
 	}
-	syncPointStore, err := sink.NewSyncpointStore(ctx, id, info.SinkURI)
+	syncPointStore, err := sink.NewSyncpointStore(ctx, id, info.SinkURI, info.SyncPointUpstreamDSN, info.SyncPointInterval, filter)
 	if err != nil {
 		return errors.Trace(err)
 	}

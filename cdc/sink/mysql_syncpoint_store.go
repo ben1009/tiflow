@@ -19,11 +19,14 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	dmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tiflow/cdc/verification"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
@@ -40,85 +43,15 @@ type mysqlSyncpointStore struct {
 }
 
 // newSyncpointStore create a sink to record the syncpoint map in downstream DB for every changefeed
-func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL) (SyncpointStore, error) {
+func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, sourceURI *url.URL, interval time.Duration, filter *filter.Filter) (SyncpointStore, error) {
 	var syncDB *sql.DB
 
 	// todo If is neither mysql nor tidb, such as kafka, just ignore this feature.
-	scheme := strings.ToLower(sinkURI.Scheme)
-	if scheme != "mysql" && scheme != "tidb" && scheme != "mysql+ssl" && scheme != "tidb+ssl" {
-		return nil, errors.New("can create mysql sink with unsupported scheme")
-	}
-	params := defaultParams.Clone()
-	s := sinkURI.Query().Get("tidb-txn-mode")
-	if s != "" {
-		if s == "pessimistic" || s == "optimistic" {
-			params.tidbTxnMode = s
-		} else {
-			log.Warn("invalid tidb-txn-mode, should be pessimistic or optimistic, use optimistic as default")
-		}
-	}
-	var tlsParam string
-	if sinkURI.Query().Get("ssl-ca") != "" {
-		credential := security.Credential{
-			CAPath:   sinkURI.Query().Get("ssl-ca"),
-			CertPath: sinkURI.Query().Get("ssl-cert"),
-			KeyPath:  sinkURI.Query().Get("ssl-key"),
-		}
-		tlsCfg, err := credential.ToTLSConfig()
-		if err != nil {
-			return nil, cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack("fail to open MySQL connection")
-		}
-		name := "cdc_mysql_tls" + "syncpoint" + id
-		err = dmysql.RegisterTLSConfig(name, tlsCfg)
-		if err != nil {
-			return nil, cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack("fail to open MySQL connection")
-		}
-		tlsParam = "?tls=" + name
-	}
-	if _, ok := sinkURI.Query()["time-zone"]; ok {
-		s = sinkURI.Query().Get("time-zone")
-		if s == "" {
-			params.timezone = ""
-		} else {
-			params.timezone = fmt.Sprintf(`"%s"`, s)
-		}
-	} else {
-		tz := util.TimezoneFromCtx(ctx)
-		params.timezone = fmt.Sprintf(`"%s"`, tz.String())
-	}
-
-	// dsn format of the driver:
-	// [username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
-	username := sinkURI.User.Username()
-	password, _ := sinkURI.User.Password()
-	port := sinkURI.Port()
-	if username == "" {
-		username = "root"
-	}
-	if port == "" {
-		port = "4000"
-	}
-
-	dsnStr := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", username, password, sinkURI.Hostname(), port, tlsParam)
-	dsn, err := dmysql.ParseDSN(dsnStr)
+	sinkDSNStr, err := generateDSNStr(ctx, sinkURI, "sink")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-
-	// create test db used for parameter detection
-	if dsn.Params == nil {
-		dsn.Params = make(map[string]string, 1)
-	}
-	testDB, err := sql.Open("mysql", dsn.FormatDSN())
-	if err != nil {
-		return nil, cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack("fail to open MySQL connection when configuring sink")
-	}
-	defer testDB.Close()
-	dsnStr, err = generateDSNByParams(ctx, dsn, params, testDB)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	syncDB, err = sql.Open("mysql", dsnStr)
+	syncDB, err = sql.Open("mysql", sinkDSNStr)
 	if err != nil {
 		return nil, cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack("fail to open MySQL connection")
 	}
@@ -131,8 +64,102 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL) (S
 	syncpointStore := &mysqlSyncpointStore{
 		db: syncDB,
 	}
+	sourceDSNStr, err := generateDSNStr(ctx, sourceURI, "source")
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	cfg := verification.Config{
+		// delay the verification in case syncpoint not started
+		CheckIntervalInSec: interval + time.Millisecond*50,
+		UpstreamDSN:        sourceDSNStr,
+		DownStreamDSN:      sinkDSNStr,
+		Filter:             filter,
+	}
+	err = verification.NewVerification(ctx, &cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	return syncpointStore, nil
+}
+
+func generateDSNStr(ctx context.Context, uri *url.URL, dsnType string) (string, error) {
+	scheme := strings.ToLower(uri.Scheme)
+	if scheme != "mysql" && scheme != "tidb" && scheme != "mysql+ssl" && scheme != "tidb+ssl" {
+		return "", errors.New("can create mysql sink with unsupported scheme")
+	}
+	params := defaultParams.Clone()
+	s := uri.Query().Get("tidb-txn-mode")
+	if s != "" {
+		if s == "pessimistic" || s == "optimistic" {
+			params.tidbTxnMode = s
+		} else {
+			log.Warn("invalid tidb-txn-mode, should be pessimistic or optimistic, use optimistic as default")
+		}
+	}
+	var tlsParam string
+	if uri.Query().Get("ssl-ca") != "" {
+		credential := security.Credential{
+			CAPath:   uri.Query().Get("ssl-ca"),
+			CertPath: uri.Query().Get("ssl-cert"),
+			KeyPath:  uri.Query().Get("ssl-key"),
+		}
+		tlsCfg, err := credential.ToTLSConfig()
+		if err != nil {
+			return "", cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack("fail to open MySQL connection")
+		}
+		name := "cdc_mysql_tls" + "syncpoint" + dsnType
+		err = dmysql.RegisterTLSConfig(name, tlsCfg)
+		if err != nil {
+			return "", cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack("fail to open MySQL connection")
+		}
+		tlsParam = "?tls=" + name
+	}
+	if _, ok := uri.Query()["time-zone"]; ok {
+		s = uri.Query().Get("time-zone")
+		if s == "" {
+			params.timezone = ""
+		} else {
+			params.timezone = fmt.Sprintf(`"%s"`, s)
+		}
+	} else {
+		tz := util.TimezoneFromCtx(ctx)
+		params.timezone = fmt.Sprintf(`"%s"`, tz.String())
+	}
+
+	// dsn format of the driver:
+	// [username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
+	username := uri.User.Username()
+	password, _ := uri.User.Password()
+	port := uri.Port()
+	if username == "" {
+		username = "root"
+	}
+	if port == "" {
+		port = "4000"
+	}
+
+	dsnStr := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", username, password, uri.Hostname(), port, tlsParam)
+	dsn, err := dmysql.ParseDSN(dsnStr)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+
+	// create test db used for parameter detection
+	if dsn.Params == nil {
+		dsn.Params = make(map[string]string, 1)
+	}
+	testDB, err := sql.Open("mysql", dsn.FormatDSN())
+	if err != nil {
+		return "", cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack(fmt.Sprintf("fail to open MySQL connection when configuring %s", dsnType))
+	}
+	defer testDB.Close()
+	dsnStr, err = generateDSNByParams(ctx, dsn, params, testDB)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+
+	return dsnStr, nil
 }
 
 func (s *mysqlSyncpointStore) CreateSynctable(ctx context.Context) error {

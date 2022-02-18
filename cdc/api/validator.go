@@ -129,7 +129,8 @@ func verifyCreateChangefeedConfig(
 		State:             model.StateNormal,
 		SyncPointEnabled:  false,
 		SyncPointInterval: 10 * time.Minute,
-		CreatorVersion:    version.ReleaseVersion,
+		// SyncPointUpstreamDSN: changefeedConfig.SinkURI
+		CreatorVersion: version.ReleaseVersion,
 	}
 
 	if !replicaConfig.ForceReplicate && !changefeedConfig.IgnoreIneligibleTable {

@@ -32,7 +32,7 @@ type Verifier interface {
 }
 
 type Config struct {
-	CheckIntervalInSec int
+	CheckIntervalInSec time.Duration
 	ResourceLimitation string
 	UpstreamDSN        string
 	DownStreamDSN      string
@@ -46,7 +46,7 @@ type TiDBVerification struct {
 }
 
 const (
-	defaultCheckIntervalInSec = 60
+	defaultCheckIntervalIn = 60 * time.Second
 )
 
 const (
@@ -55,18 +55,18 @@ const (
 	checkFail
 )
 
-func NewVerification(ctx context.Context, config *Config) (*TiDBVerification, error) {
+func NewVerification(ctx context.Context, config *Config) error {
 	upstreamDB, err := openDB(ctx, config.UpstreamDSN)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	downstreamDB, err := openDB(ctx, config.DownStreamDSN)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if config.CheckIntervalInSec == 0 {
-		config.CheckIntervalInSec = defaultCheckIntervalInSec
+		config.CheckIntervalInSec = defaultCheckIntervalIn
 	}
 	v := &TiDBVerification{
 		config:            config,
@@ -75,7 +75,7 @@ func NewVerification(ctx context.Context, config *Config) (*TiDBVerification, er
 	}
 	go v.runVerify(ctx)
 
-	return v, nil
+	return nil
 }
 
 type TimeRange struct {
@@ -84,7 +84,7 @@ type TimeRange struct {
 }
 
 func (v *TiDBVerification) runVerify(ctx context.Context) {
-	ticker := time.NewTicker(time.Duration(v.config.CheckIntervalInSec) * time.Second)
+	ticker := time.NewTicker(v.config.CheckIntervalInSec)
 	defer ticker.Stop()
 
 	select {
