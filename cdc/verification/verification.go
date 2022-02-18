@@ -46,7 +46,7 @@ type TiDBVerification struct {
 }
 
 const (
-	defaultCheckIntervalIn = 60 * time.Second
+	defaultCheckInterval = 60 * time.Second
 )
 
 const (
@@ -66,7 +66,7 @@ func NewVerification(ctx context.Context, config *Config) error {
 	}
 
 	if config.CheckIntervalInSec == 0 {
-		config.CheckIntervalInSec = defaultCheckIntervalIn
+		config.CheckIntervalInSec = defaultCheckInterval
 	}
 	v := &TiDBVerification{
 		config:            config,

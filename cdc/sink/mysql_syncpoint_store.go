@@ -60,7 +60,6 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, so
 		return nil, cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack("fail to open MySQL connection")
 	}
 
-	log.Info("Start mysql syncpoint sink")
 	syncpointStore := &mysqlSyncpointStore{
 		db: syncDB,
 	}
@@ -79,6 +78,7 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, so
 	if err != nil {
 		return nil, err
 	}
+	log.Info("Start mysql syncpoint sink")
 
 	return syncpointStore, nil
 }
