@@ -32,10 +32,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// SyncpointTableName is the name of table where all syncpoint maps sit
+// syncpointTableName is the name of table where all syncpoint maps sit
 const (
-	SyncpointDatabaseName string = "tidb_cdc"
-	SyncpointTableName    string = "syncpoint_v1"
+	syncpointDatabaseName string = "tidb_cdc"
+	syncpointTableName    string = "syncpoint_v1"
 )
 
 type mysqlSyncpointStore struct {
@@ -69,10 +69,12 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, so
 	}
 	cfg := verification.Config{
 		// delay the verification in case syncpoint not started
-		CheckIntervalInSec: interval + time.Millisecond*50,
+		CheckIntervalInSec: interval + time.Second,
 		UpstreamDSN:        sourceDSNStr,
 		DownStreamDSN:      sinkDSNStr,
 		Filter:             filter,
+		DataBaseName:       syncpointDatabaseName,
+		TableName:          syncpointTableName,
 	}
 	err = verification.NewVerification(ctx, &cfg)
 	if err != nil {
@@ -163,7 +165,7 @@ func generateDSNStr(ctx context.Context, uri *url.URL, dsnType string) (string, 
 }
 
 func (s *mysqlSyncpointStore) CreateSynctable(ctx context.Context) error {
-	database := SyncpointDatabaseName
+	database := syncpointDatabaseName
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		log.Error("create sync table: begin Tx fail", zap.Error(err))
@@ -185,7 +187,7 @@ func (s *mysqlSyncpointStore) CreateSynctable(ctx context.Context) error {
 		}
 		return cerror.WrapError(cerror.ErrMySQLTxnError, err)
 	}
-	_, err = tx.Exec("CREATE TABLE  IF NOT EXISTS " + SyncpointTableName + " (cf varchar(255),primary_ts varchar(18),secondary_ts varchar(18), result int, PRIMARY KEY ( `cf`, `primary_ts` ) )")
+	_, err = tx.Exec("CREATE TABLE  IF NOT EXISTS " + syncpointTableName + " (cf varchar(255),primary_ts varchar(18),secondary_ts varchar(18), result int, PRIMARY KEY ( `cf`, `primary_ts` ) )")
 	if err != nil {
 		err2 := tx.Rollback()
 		if err2 != nil {
@@ -214,7 +216,7 @@ func (s *mysqlSyncpointStore) SinkSyncpoint(ctx context.Context, id string, chec
 		}
 		return cerror.WrapError(cerror.ErrMySQLTxnError, err)
 	}
-	_, err = tx.Exec("insert ignore into "+SyncpointDatabaseName+"."+SyncpointTableName+"(cf, primary_ts, secondary_ts, result) VALUES (?,?,?,?)", id, checkpointTs, secondaryTs, 0)
+	_, err = tx.Exec("insert ignore into "+syncpointDatabaseName+"."+syncpointTableName+"(cf, primary_ts, secondary_ts, result) VALUES (?,?,?,?)", id, checkpointTs, secondaryTs, 0)
 	if err != nil {
 		err2 := tx.Rollback()
 		if err2 != nil {
