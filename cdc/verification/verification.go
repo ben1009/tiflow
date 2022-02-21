@@ -17,11 +17,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
+	"go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
@@ -38,12 +41,15 @@ type Config struct {
 	Filter             *filter.Filter
 	DataBaseName       string
 	TableName          string
+	StartTs            uint64
+	ChangefeedID       string
 }
 
 type TiDBVerification struct {
 	config            *Config
 	upstreamChecker   *checker
 	downstreamChecker *checker
+	running           atomic.Bool
 }
 
 const (
@@ -97,7 +103,7 @@ func (v *TiDBVerification) runVerify(ctx context.Context) {
 	case <-ticker.C:
 		// TODO:
 		// resource limitation cancel https://www.percona.com/doc/percona-toolkit/LATEST/pt-table-checksum.html
-		_, err := v.Verify(ctx)
+		_, _, err := v.Verify(ctx)
 		if err != nil {
 			log.Warn("runVerify fail", zap.Error(err))
 		}
@@ -107,61 +113,78 @@ func (v *TiDBVerification) runVerify(ctx context.Context) {
 	}
 }
 
-func (v *TiDBVerification) Verify(ctx context.Context) (map[string]*TimeRange, error) {
-	tsList, err := v.getTS(ctx)
+func (v *TiDBVerification) Verify(ctx context.Context) (string, string, error) {
+	if v.running.Load() {
+		return "", "", nil
+	}
+
+	v.running.Store(true)
+	defer v.running.Store(false)
+
+	ts, err := v.getTS(ctx)
 	if err != nil {
-		return nil, err
+		return "", "", err
+	}
+	if ts.result != unchecked {
+		return "", "", nil
 	}
 
-	rets := map[string]*TimeRange{}
-	for _, t := range tsList {
-		t1 := t
-		for t1.result == unchecked {
-			ret, err := v.checkConsistency(ctx, t1)
-			if err != nil {
-				return nil, err
-			}
+	p, err := strconv.Atoi(ts.primaryTs)
+	if err != nil {
+		return "", "", err
+	}
+	if uint64(p) > v.config.StartTs {
+		v.config.StartTs = uint64(p)
+	}
 
-			checkRet := checkPass
-			if !ret {
-				checkRet = checkFail
-			}
-			err = v.updateCheckResult(ctx, t1, checkRet)
-			if err != nil {
-				return nil, err
-			}
-
-			// if pass no need to run module check, if run from previous set startTs
-			if checkRet == checkPass {
-				if v, ok := rets[t1.cf]; ok {
-					v.StatTs = t1.primaryTs
-				}
-				break
-			}
-
-			preTS, err := v.getPreviousTS(ctx, t1.cf, t1.primaryTs)
-			if err != nil {
-				return nil, err
-			}
-
-			if preTS == nil {
-				rets[t1.cf] = &TimeRange{EndTs: t1.primaryTs}
-				break
-			}
-			// if previous check pass run module check, if fail means already run module check last time, skip, if unchecked, run e2e check against previous
-			if preTS.result == checkPass {
-				rets[t1.cf] = &TimeRange{StatTs: preTS.primaryTs, EndTs: t1.primaryTs}
-			}
-			if preTS.result == unchecked {
-				rets[t1.cf] = &TimeRange{EndTs: t1.primaryTs}
-			}
-			t1 = preTS
+	startTs, endTs := "", ""
+	for ts.result == unchecked {
+		ret, err := v.checkConsistency(ctx, ts)
+		if err != nil {
+			return "", "", err
 		}
+
+		checkRet := checkPass
+		if !ret {
+			checkRet = checkFail
+		}
+		err = v.updateCheckResult(ctx, ts, checkRet)
+		if err != nil {
+			return "", "", err
+		}
+
+		// if pass no need to run module check, if run from previous set startTs
+		if checkRet == checkPass {
+			if endTs != "" {
+				startTs = ts.primaryTs
+			}
+			break
+		}
+
+		preTs, err := v.getPreviousTS(ctx, ts.cf, ts.primaryTs)
+		if err != nil {
+			if sql.ErrNoRows == errors.Cause(err) {
+				endTs = ts.primaryTs
+				break
+			}
+			return "", "", err
+		}
+
+		// if previous check pass run module check, if fail means already run module check last time, skip, if unchecked, run e2e check against previous
+		if preTs.result == checkPass {
+			startTs = preTs.primaryTs
+			endTs = ts.primaryTs
+		}
+		if preTs.result == unchecked {
+			endTs = ts.primaryTs
+		}
+		ts = preTs
 	}
-	return rets, nil
+
+	return startTs, endTs, nil
 }
 
-func (v *TiDBVerification) checkConsistency(ctx context.Context, t *tsPair) (bool, error) {
+func (v *TiDBVerification) checkConsistency(ctx context.Context, t tsPair) (bool, error) {
 	err := setSnapshot(ctx, v.upstreamChecker.db, t.primaryTs)
 	if err != nil {
 		return false, err
@@ -177,7 +200,7 @@ func (v *TiDBVerification) checkConsistency(ctx context.Context, t *tsPair) (boo
 	return compareCheckSum(ctx, v.upstreamChecker, v.downstreamChecker, v.config.Filter)
 }
 
-func (v *TiDBVerification) updateCheckResult(ctx context.Context, t *tsPair, checkRet int) error {
+func (v *TiDBVerification) updateCheckResult(ctx context.Context, t tsPair, checkRet int) error {
 	tx, err := v.upstreamChecker.db.BeginTx(ctx, nil)
 	if err != nil {
 		return cerror.WrapError(cerror.ErrMySQLTxnError, err)
@@ -219,52 +242,37 @@ type tsPair struct {
 	result      int
 }
 
-func (v *TiDBVerification) getPreviousTS(ctx context.Context, cf, pts string) (*tsPair, error) {
-	var t *tsPair
+func (v *TiDBVerification) getPreviousTS(ctx context.Context, cf, pts string) (tsPair, error) {
+	var t tsPair
 	row := v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select cf, promary_ts, secondary_ts, result from %s.%s where cf=%s and primary_ts<%s order by primary_ts desc limit 1", v.config.DataBaseName, v.config.TableName, cf, pts))
 	if row.Err() != nil {
 		return t, cerror.WrapError(cerror.ErrMySQLQueryError, row.Err())
 	}
 
-	if err := row.Scan(&t.cf, &t.primaryTs, &t.secondaryTs, &t.result); err != nil && err != sql.ErrNoRows {
+	if err := row.Scan(&t.cf, &t.primaryTs, &t.secondaryTs, &t.result); err != nil {
 		return t, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 	}
 	return t, nil
 }
 
-func (v *TiDBVerification) getTS(ctx context.Context) ([]*tsPair, error) {
-	ts := []*tsPair{}
-	rows, err := v.upstreamChecker.db.QueryContext(ctx, fmt.Sprintf("select max(primary_ts), cf from %s.%s group by cf", v.config.DataBaseName, v.config.TableName))
-	if err != nil {
+func (v *TiDBVerification) getTS(ctx context.Context) (tsPair, error) {
+	var ts tsPair
+	row := v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select max(primary_ts), cf from %s.%s where primary_ts>= %s and cf=%s", v.config.DataBaseName, v.config.TableName, strconv.Itoa(int(v.config.StartTs)), v.config.ChangefeedID))
+	if row.Err() != nil {
+		return ts, cerror.WrapError(cerror.ErrMySQLQueryError, row.Err())
+	}
+	if err := row.Scan(&ts.primaryTs, &ts.cf); err != nil {
 		return ts, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 	}
-	defer func() {
-		if err = rows.Close(); err != nil {
-			log.Error("getTS close rows failed", zap.Error(err))
-		}
-	}()
 
-	maxTsList := map[string]string{}
-	var maxTs, cf string
-	for rows.Next() {
-		if err = rows.Scan(&maxTs, &cf); err != nil {
-			return ts, cerror.WrapError(cerror.ErrMySQLQueryError, err)
-		}
-		maxTsList[cf] = maxTs
+	row = v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select cf, promary_ts, secondary_ts, result from %s.%s where cf=%s and primary_ts=%s", v.config.DataBaseName, v.config.TableName, ts.cf, ts.primaryTs))
+	if row.Err() != nil {
+		return ts, cerror.WrapError(cerror.ErrMySQLQueryError, row.Err())
+	}
+	if err := row.Scan(&ts.cf, &ts.primaryTs, &ts.secondaryTs, &ts.result); err != nil {
+		return ts, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 	}
 
-	for cf, pts := range maxTsList {
-		row := v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select cf, promary_ts, secondary_ts, result from %s.%s where cf=%s and primary_ts=%s", v.config.DataBaseName, v.config.TableName, cf, pts))
-		if row.Err() != nil {
-			return ts, cerror.WrapError(cerror.ErrMySQLQueryError, row.Err())
-		}
-
-		var t *tsPair
-		if err = row.Scan(&t.cf, &t.primaryTs, &t.secondaryTs, &t.result); err != nil {
-			return ts, cerror.WrapError(cerror.ErrMySQLQueryError, err)
-		}
-		ts = append(ts, t)
-	}
 	return ts, nil
 }
 

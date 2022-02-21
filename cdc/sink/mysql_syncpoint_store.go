@@ -43,11 +43,11 @@ type mysqlSyncpointStore struct {
 }
 
 // newSyncpointStore create a sink to record the syncpoint map in downstream DB for every changefeed
-func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, sourceURI *url.URL, interval time.Duration, filter *filter.Filter) (SyncpointStore, error) {
+func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, sourceURI *url.URL, interval time.Duration, filter *filter.Filter, startTs uint64) (SyncpointStore, error) {
 	var syncDB *sql.DB
 
 	// todo If is neither mysql nor tidb, such as kafka, just ignore this feature.
-	sinkDSNStr, err := generateDSNStr(ctx, sinkURI, "sink")
+	sinkDSNStr, err := generateDSNStr(ctx, id, sinkURI, "sink")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -63,7 +63,7 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, so
 	syncpointStore := &mysqlSyncpointStore{
 		db: syncDB,
 	}
-	sourceDSNStr, err := generateDSNStr(ctx, sourceURI, "source")
+	sourceDSNStr, err := generateDSNStr(ctx, id, sourceURI, "source")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -75,6 +75,8 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, so
 		Filter:             filter,
 		DataBaseName:       syncpointDatabaseName,
 		TableName:          syncpointTableName,
+		StartTs:            startTs,
+		ChangefeedID:       id,
 	}
 	err = verification.NewVerification(ctx, &cfg)
 	if err != nil {
@@ -85,7 +87,7 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, so
 	return syncpointStore, nil
 }
 
-func generateDSNStr(ctx context.Context, uri *url.URL, dsnType string) (string, error) {
+func generateDSNStr(ctx context.Context, id string, uri *url.URL, dsnType string) (string, error) {
 	scheme := strings.ToLower(uri.Scheme)
 	if scheme != "mysql" && scheme != "tidb" && scheme != "mysql+ssl" && scheme != "tidb+ssl" {
 		return "", errors.New("can create mysql sink with unsupported scheme")
@@ -110,7 +112,7 @@ func generateDSNStr(ctx context.Context, uri *url.URL, dsnType string) (string, 
 		if err != nil {
 			return "", cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack("fail to open MySQL connection")
 		}
-		name := "cdc_mysql_tls" + "syncpoint" + dsnType
+		name := fmt.Sprintf("cdc_mysql_tls_syncpoint_%s_%s", id, dsnType)
 		err = dmysql.RegisterTLSConfig(name, tlsCfg)
 		if err != nil {
 			return "", cerror.ErrMySQLConnectionError.Wrap(err).GenWithStack("fail to open MySQL connection")
@@ -187,6 +189,7 @@ func (s *mysqlSyncpointStore) CreateSynctable(ctx context.Context) error {
 		}
 		return cerror.WrapError(cerror.ErrMySQLTxnError, err)
 	}
+	// TODO: gc, ttl for tidb, partition table for mysql
 	_, err = tx.Exec("CREATE TABLE  IF NOT EXISTS " + syncpointTableName + " (cf varchar(255),primary_ts varchar(18),secondary_ts varchar(18), result int, PRIMARY KEY ( `cf`, `primary_ts` ) )")
 	if err != nil {
 		err2 := tx.Rollback()

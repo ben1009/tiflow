@@ -37,7 +37,7 @@ type SyncpointStore interface {
 }
 
 // NewSyncpointStore creates a new Spyncpoint sink with the sink-uri
-func NewSyncpointStore(ctx context.Context, changefeedID model.ChangeFeedID, sinkURIStr string, sourceURIStr string, interval time.Duration, filter *filter.Filter) (SyncpointStore, error) {
+func NewSyncpointStore(ctx context.Context, changefeedID model.ChangeFeedID, sinkURIStr string, sourceURIStr string, interval time.Duration, filter *filter.Filter, startTs uint64) (SyncpointStore, error) {
 	// parse sinkURI as a URI
 	sinkURI, err := url.Parse(sinkURIStr)
 	if err != nil {
@@ -49,7 +49,7 @@ func NewSyncpointStore(ctx context.Context, changefeedID model.ChangeFeedID, sin
 	}
 	switch strings.ToLower(sinkURI.Scheme) {
 	case "mysql", "tidb", "mysql+ssl", "tidb+ssl":
-		return newMySQLSyncpointStore(ctx, changefeedID, sinkURI, sourceURI, interval, filter)
+		return newMySQLSyncpointStore(ctx, changefeedID, sinkURI, sourceURI, interval, filter, startTs)
 	default:
 		return nil, cerror.ErrSinkURIInvalid.GenWithStack("the sink scheme (%s) is not supported", sinkURI.Scheme)
 	}
