@@ -29,7 +29,7 @@ import (
 )
 
 type Verifier interface {
-	Verify(ctx context.Context) (map[string]*TimeRange, error)
+	Verify(ctx context.Context) (string, string, error)
 	Close() error
 }
 
@@ -83,11 +83,6 @@ func NewVerification(ctx context.Context, config *Config) error {
 	go v.runVerify(ctx)
 
 	return nil
-}
-
-type TimeRange struct {
-	StatTs string
-	EndTs  string
 }
 
 func (v *TiDBVerification) runVerify(ctx context.Context) {
