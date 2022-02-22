@@ -43,7 +43,7 @@ type mysqlSyncpointStore struct {
 }
 
 // newSyncpointStore create a sink to record the syncpoint map in downstream DB for every changefeed
-func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, sourceURI *url.URL, interval time.Duration, filter *filter.Filter, startTs uint64) (SyncpointStore, error) {
+func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, sourceURI *url.URL, interval time.Duration, filter *filter.Filter) (SyncpointStore, error) {
 	var syncDB *sql.DB
 
 	// todo If is neither mysql nor tidb, such as kafka, just ignore this feature.
@@ -68,18 +68,18 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, so
 		return nil, errors.Trace(err)
 	}
 	cfg := verification.Config{
-		// delay the verification in case syncpoint not started
+		// delay the verification in case syncpoint not started immediately
 		CheckIntervalInSec: interval + time.Second,
 		UpstreamDSN:        sourceDSNStr,
 		DownStreamDSN:      sinkDSNStr,
 		Filter:             filter,
 		DataBaseName:       syncpointDatabaseName,
 		TableName:          syncpointTableName,
-		StartTs:            startTs,
 		ChangefeedID:       id,
 	}
 	err = verification.NewVerification(ctx, &cfg)
 	if err != nil {
+		log.Warn("Start verification fail", zap.Error(err))
 		return nil, err
 	}
 	log.Info("Start mysql syncpoint sink")

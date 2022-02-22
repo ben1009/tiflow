@@ -38,11 +38,11 @@ type Config struct {
 	ResourceLimitation string
 	UpstreamDSN        string
 	DownStreamDSN      string
-	Filter             *filter.Filter
-	DataBaseName       string
-	TableName          string
-	StartTs            uint64
-	ChangefeedID       string
+	// TODO: how about the IgnoreTxnStartTs and DDLAllowlist, skip the tables involved, send as params?
+	Filter       *filter.Filter
+	DataBaseName string
+	TableName    string
+	ChangefeedID string
 }
 
 type TiDBVerification struct {
@@ -94,22 +94,26 @@ func (v *TiDBVerification) runVerify(ctx context.Context) {
 	ticker := time.NewTicker(v.config.CheckIntervalInSec)
 	defer ticker.Stop()
 
-	select {
-	case <-ctx.Done():
-		err := v.Close()
-		if err != nil {
-			log.Error("runVerify Close fail", zap.Error(err))
-		}
-	case <-ticker.C:
-		// TODO:
-		// resource limitation cancel https://www.percona.com/doc/percona-toolkit/LATEST/pt-table-checksum.html
-		_, _, err := v.Verify(ctx)
-		if err != nil {
-			log.Warn("runVerify fail", zap.Error(err))
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("runVerify ctx cancel", zap.Error(ctx.Err()))
+			err := v.Close()
+			if err != nil {
+				log.Error("runVerify Close fail", zap.Error(err))
+			}
+			return
+		case <-ticker.C:
+			// TODO:
+			// resource limitation cancel https://www.percona.com/doc/percona-toolkit/LATEST/pt-table-checksum.html
+			startTs, endTs, err := v.Verify(ctx)
+			if err != nil {
+				log.Warn("runVerify fail", zap.Error(err))
+			}
+			log.Info("runVerify ret", zap.String("startTs", startTs), zap.String("endTs", endTs))
 
-		// TODO: module level check
-
+			// TODO: module level check
+		}
 	}
 }
 
@@ -127,14 +131,6 @@ func (v *TiDBVerification) Verify(ctx context.Context) (string, string, error) {
 	}
 	if ts.result != unchecked {
 		return "", "", nil
-	}
-
-	p, err := strconv.Atoi(ts.primaryTs)
-	if err != nil {
-		return "", "", err
-	}
-	if uint64(p) > v.config.StartTs {
-		v.config.StartTs = uint64(p)
 	}
 
 	startTs, endTs := "", ""
@@ -170,10 +166,15 @@ func (v *TiDBVerification) Verify(ctx context.Context) (string, string, error) {
 			return "", "", err
 		}
 
-		// if previous check pass run module check, if fail means already run module check last time, skip, if unchecked, run e2e check against previous
+		// if previous check pass run module check.
+		// if fail means already run module check last time, skip by return empty startTs, endTs.
+		// if unchecked, run e2e check against previous.
 		if preTs.result == checkPass {
 			startTs = preTs.primaryTs
 			endTs = ts.primaryTs
+		}
+		if preTs.result == checkFail {
+			startTs, endTs = "", ""
 		}
 		if preTs.result == unchecked {
 			endTs = ts.primaryTs
@@ -201,12 +202,18 @@ func (v *TiDBVerification) checkConsistency(ctx context.Context, t tsPair) (bool
 }
 
 func (v *TiDBVerification) updateCheckResult(ctx context.Context, t tsPair, checkRet int) error {
-	tx, err := v.upstreamChecker.db.BeginTx(ctx, nil)
+	err := setSnapshot(ctx, v.downstreamChecker.db, "0")
+	if err != nil {
+		return err
+	}
+
+	tx, err := v.downstreamChecker.db.BeginTx(ctx, nil)
 	if err != nil {
 		return cerror.WrapError(cerror.ErrMySQLTxnError, err)
 	}
 
-	_, err = tx.ExecContext(ctx, fmt.Sprintf("update %s.%s set result=%d where primary_ts=%s and secondary_ts=%s and cf=%s", v.config.DataBaseName, v.config.TableName, checkRet, t.primaryTs, t.secondaryTs, t.cf))
+	query := fmt.Sprintf("update %s.%s set result=? where primary_ts=? and secondary_ts=? and cf=?", v.config.DataBaseName, v.config.TableName)
+	_, err = tx.ExecContext(ctx, query, checkRet, t.primaryTs, t.secondaryTs, t.cf)
 	if err != nil {
 		errR := tx.Rollback()
 		if errR != nil {
@@ -244,28 +251,33 @@ type tsPair struct {
 
 func (v *TiDBVerification) getPreviousTS(ctx context.Context, cf, pts string) (tsPair, error) {
 	var t tsPair
-	row := v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select cf, promary_ts, secondary_ts, result from %s.%s where cf=%s and primary_ts<%s order by primary_ts desc limit 1", v.config.DataBaseName, v.config.TableName, cf, pts))
+	query := fmt.Sprintf("select cf, primary_ts, secondary_ts, result from %s.%s where cf=? and primary_ts<? order by primary_ts desc limit 1", v.config.DataBaseName, v.config.TableName)
+	p, err := strconv.Atoi(pts)
+	if err != nil {
+		return t, err
+	}
+	row := v.downstreamChecker.db.QueryRowContext(ctx, query, cf, p)
 	if row.Err() != nil {
 		return t, cerror.WrapError(cerror.ErrMySQLQueryError, row.Err())
 	}
 
-	if err := row.Scan(&t.cf, &t.primaryTs, &t.secondaryTs, &t.result); err != nil {
-		return t, cerror.WrapError(cerror.ErrMySQLQueryError, err)
-	}
-	return t, nil
+	err = row.Scan(&t.cf, &t.primaryTs, &t.secondaryTs, &t.result)
+	return t, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 }
 
 func (v *TiDBVerification) getTS(ctx context.Context) (tsPair, error) {
 	var ts tsPair
-	row := v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select max(primary_ts), cf from %s.%s where primary_ts>= %s and cf=%s", v.config.DataBaseName, v.config.TableName, strconv.Itoa(int(v.config.StartTs)), v.config.ChangefeedID))
+	query := fmt.Sprintf("select max(primary_ts) as primary_ts from %s.%s where cf=?", v.config.DataBaseName, v.config.TableName)
+	row := v.downstreamChecker.db.QueryRowContext(ctx, query, v.config.ChangefeedID)
 	if row.Err() != nil {
 		return ts, cerror.WrapError(cerror.ErrMySQLQueryError, row.Err())
 	}
-	if err := row.Scan(&ts.primaryTs, &ts.cf); err != nil {
+	if err := row.Scan(&ts.primaryTs); err != nil {
 		return ts, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 	}
 
-	row = v.upstreamChecker.db.QueryRowContext(ctx, fmt.Sprintf("select cf, promary_ts, secondary_ts, result from %s.%s where cf=%s and primary_ts=%s", v.config.DataBaseName, v.config.TableName, ts.cf, ts.primaryTs))
+	query = fmt.Sprintf("select cf, primary_ts, secondary_ts, result from %s.%s where cf=? and primary_ts=?", v.config.DataBaseName, v.config.TableName)
+	row = v.downstreamChecker.db.QueryRowContext(ctx, query, v.config.ChangefeedID, ts.primaryTs)
 	if row.Err() != nil {
 		return ts, cerror.WrapError(cerror.ErrMySQLQueryError, row.Err())
 	}
