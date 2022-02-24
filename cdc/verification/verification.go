@@ -25,6 +25,7 @@ import (
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"go.uber.org/atomic"
+	"go.uber.org/multierr"
 	"go.uber.org/zap"
 )
 
@@ -34,7 +35,7 @@ type Verifier interface {
 }
 
 type Config struct {
-	CheckIntervalInSec time.Duration
+	CheckInterval      time.Duration
 	ResourceLimitation string
 	UpstreamDSN        string
 	DownStreamDSN      string
@@ -72,8 +73,8 @@ func NewVerification(ctx context.Context, config *Config) error {
 		return err
 	}
 
-	if config.CheckIntervalInSec == 0 {
-		config.CheckIntervalInSec = defaultCheckInterval
+	if config.CheckInterval == 0 {
+		config.CheckInterval = defaultCheckInterval
 	}
 	v := &TiDBVerification{
 		config:            config,
@@ -86,7 +87,7 @@ func NewVerification(ctx context.Context, config *Config) error {
 }
 
 func (v *TiDBVerification) runVerify(ctx context.Context) {
-	ticker := time.NewTicker(v.config.CheckIntervalInSec)
+	ticker := time.NewTicker(v.config.CheckInterval)
 	defer ticker.Stop()
 
 	for {
@@ -219,7 +220,7 @@ func (v *TiDBVerification) updateCheckResult(ctx context.Context, t tsPair, chec
 	return cerror.WrapError(cerror.ErrMySQLTxnError, tx.Commit())
 }
 
-func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
+var openDB = func(ctx context.Context, dsn string) (*sql.DB, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrMySQLConnectionError, err)
@@ -284,9 +285,6 @@ func (v *TiDBVerification) getTS(ctx context.Context) (tsPair, error) {
 }
 
 func (v *TiDBVerification) Close() error {
-	err := v.upstreamChecker.db.Close()
-	if err != nil {
-		return cerror.WrapError(cerror.ErrMySQLConnectionError, err)
-	}
-	return cerror.WrapError(cerror.ErrMySQLConnectionError, v.downstreamChecker.db.Close())
+	err := multierr.Append(v.upstreamChecker.db.Close(), v.downstreamChecker.db.Close())
+	return cerror.WrapError(cerror.ErrMySQLConnectionError, err)
 }

@@ -69,13 +69,13 @@ func newMySQLSyncpointStore(ctx context.Context, id string, sinkURI *url.URL, so
 	}
 	cfg := verification.Config{
 		// delay the verification in case syncpoint not started immediately
-		CheckIntervalInSec: interval + time.Second,
-		UpstreamDSN:        sourceDSNStr,
-		DownStreamDSN:      sinkDSNStr,
-		Filter:             filter,
-		DataBaseName:       syncpointDatabaseName,
-		TableName:          syncpointTableName,
-		ChangefeedID:       id,
+		CheckInterval: interval + time.Second,
+		UpstreamDSN:   sourceDSNStr,
+		DownStreamDSN: sinkDSNStr,
+		Filter:        filter,
+		DataBaseName:  syncpointDatabaseName,
+		TableName:     syncpointTableName,
+		ChangefeedID:  id,
 	}
 	err = verification.NewVerification(ctx, &cfg)
 	if err != nil {

@@ -25,12 +25,13 @@ import (
 	"go.uber.org/zap"
 )
 
+//go:generate mockery --name=checkSumChecker --inpackage
 type checkSumChecker interface {
 	getCheckSum(ctx context.Context, db string, f *filter.Filter) (map[string]string, error)
 	getAllDBs(ctx context.Context) ([]string, error)
-	getAllTables(ctx context.Context, db string, f *filter.Filter) ([]string, error)
-	getColumns(ctx context.Context, tableName string) ([]columnInfo, error)
-	doChecksum(ctx context.Context, columns []columnInfo, databaseName, tableName string) (string, error)
+	// getAllTables(ctx context.Context, db string, f *filter.Filter) ([]string, error)
+	// getColumns(ctx context.Context, tableName string) ([]columnInfo, error)
+	// doChecksum(ctx context.Context, columns []columnInfo, databaseName, tableName string) (string, error)
 }
 
 type checker struct {
@@ -176,7 +177,7 @@ func (c *checker) doChecksum(ctx context.Context, columns []columnInfo, database
 }
 
 // TODO: use ADMIN CHECKSUM TABLE for tidb if needed
-func compareCheckSum(ctx context.Context, upstreamChecker, downstreamChecker checkSumChecker, f *filter.Filter) (bool, error) {
+var compareCheckSum = func(ctx context.Context, upstreamChecker, downstreamChecker checkSumChecker, f *filter.Filter) (bool, error) {
 	dbs, err := upstreamChecker.getAllDBs(ctx)
 	if err != nil {
 		return false, err
