@@ -29,9 +29,6 @@ import (
 type checkSumChecker interface {
 	getCheckSum(ctx context.Context, db string, f *filter.Filter) (map[string]string, error)
 	getAllDBs(ctx context.Context) ([]string, error)
-	// getAllTables(ctx context.Context, db string, f *filter.Filter) ([]string, error)
-	// getColumns(ctx context.Context, tableName string) ([]columnInfo, error)
-	// doChecksum(ctx context.Context, columns []columnInfo, databaseName, tableName string) (string, error)
 }
 
 type checker struct {
