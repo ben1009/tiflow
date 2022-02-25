@@ -134,7 +134,7 @@ func verifyCreateChangefeedConfig(
 	}
 
 	if !replicaConfig.ForceReplicate && !changefeedConfig.IgnoreIneligibleTable {
-		ineligibleTables, _, err := verifyTables(replicaConfig, capture.Storage, changefeedConfig.StartTS)
+		ineligibleTables, _, err := VerifyTables(replicaConfig, capture.Storage, changefeedConfig.StartTS)
 		if err != nil {
 			return nil, err
 		}
@@ -221,6 +221,11 @@ func verifyTables(replicaConfig *config.ReplicaConfig, storage tidbkv.Storage, s
 
 	for _, tableInfo := range snap.Tables() {
 		if f.ShouldIgnoreTable(tableInfo.TableName.Schema, tableInfo.TableName.Table) {
+			continue
+		}
+		// Sequence is not supported yet, TiCDC needs to filter all sequence tables.
+		// See https://github.com/pingcap/tiflow/issues/4559
+		if tableInfo.IsSequence() {
 			continue
 		}
 		if !tableInfo.IsEligible(false /* forceReplicate */) {
