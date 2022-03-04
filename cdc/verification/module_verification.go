@@ -218,7 +218,6 @@ func (m *ModuleVerification) Verify(ctx context.Context, startTs, endTs string) 
 	err := m.db.DeleteRange([]byte(startTs), []byte(endTs))
 	if err != nil {
 		return cerror.WrapError(cerror.ErrPebbleDBError, err)
-
 	}
 
 	return nil

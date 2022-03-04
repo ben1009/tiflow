@@ -641,6 +641,11 @@ error = '''
 etcd api call error
 '''
 
+["CDC:ErrPebbleDBError"]
+error = '''
+leveldb error: %s
+'''
+
 ["CDC:ErrPeerMessageClientClosed"]
 error = '''
 peer-to-peer message client has been closed
@@ -1049,6 +1054,11 @@ unmarshal failed
 ["CDC:ErrUpdateServiceSafepointFailed"]
 error = '''
 updating service safepoint failed
+'''
+
+["CDC:ErrVerificationConfigInvalid"]
+error = '''
+verification config invalid
 '''
 
 ["CDC:ErrVersionIncompatible"]
