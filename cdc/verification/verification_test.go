@@ -31,11 +31,14 @@ func TestNewVerification(t *testing.T) {
 		openDB = origin
 	}()
 
+	err := NewVerification(ctx, nil)
+	require.NotNil(t, err)
+
 	openDB = func(ctx context.Context, dsn string) (*sql.DB, error) {
 		db, _, err := sqlmock.New()
 		return db, err
 	}
-	err := NewVerification(ctx, &Config{CheckInterval: time.Minute})
+	err = NewVerification(ctx, &Config{CheckInterval: time.Minute})
 	require.Nil(t, err)
 
 	openDB = func(ctx context.Context, dsn string) (*sql.DB, error) {

@@ -17,12 +17,15 @@ import (
 	"context"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/puller"
+	"github.com/pingcap/tiflow/cdc/verification"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	"github.com/pingcap/tiflow/pkg/pipeline"
 	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/util"
+	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -70,6 +73,10 @@ func (n *pullerNode) start(ctx pipeline.NodeContext, wg *errgroup.Group, isActor
 	ctxC = util.PutTableInfoInCtx(ctxC, n.tableID, n.tableName)
 	ctxC = util.PutCaptureAddrInCtx(ctxC, ctx.GlobalVars().CaptureInfo.AdvertiseAddr)
 	ctxC = util.PutChangefeedIDInCtx(ctxC, ctx.ChangefeedVars().ID)
+	verifier, err := verification.NewModuleVerification(ctxC, &verification.ModuleVerificationConfig{ChangeFeedID: n.changefeed})
+	if err != nil {
+		log.Error("newModuleVerification fail", zap.String("changefeed", n.changefeed), zap.Error(err), zap.String("module", "puller"))
+	}
 	// NOTICE: always pull the old value internally
 	// See also: https://github.com/pingcap/tiflow/issues/2301.
 	plr := puller.NewPuller(
@@ -95,6 +102,7 @@ func (n *pullerNode) start(ctx pipeline.NodeContext, wg *errgroup.Group, isActor
 					continue
 				}
 				pEvent := model.NewPolymorphicEvent(rawKV)
+				verifier.SentTrackData(ctxC, verification.Puller, []verification.TrackData{{TrackID: string(pEvent.TrackID), CommitTs: pEvent.CRTs}})
 				if isActorMode {
 					sorter.handleRawEvent(ctx, pEvent)
 				} else {
