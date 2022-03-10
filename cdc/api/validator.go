@@ -205,7 +205,7 @@ func verifyUpdateChangefeedConfig(ctx context.Context, changefeedConfig model.Ch
 	return newInfo, nil
 }
 
-func verifyTables(replicaConfig *config.ReplicaConfig, storage tidbkv.Storage, startTs uint64) (ineligibleTables, eligibleTables []model.TableName, err error) {
+func VerifyTables(replicaConfig *config.ReplicaConfig, storage tidbkv.Storage, startTs uint64) (ineligibleTables, eligibleTables []model.TableName, err error) {
 	f, err := filter.NewFilter(replicaConfig)
 	if err != nil {
 		return nil, nil, errors.Trace(err)

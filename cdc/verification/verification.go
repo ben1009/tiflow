@@ -68,6 +68,7 @@ const (
 	checkFail
 )
 
+// NewVerification start the verification process if no error
 func NewVerification(ctx context.Context, config *Config) error {
 	if config == nil {
 		return cerror.WrapError(cerror.ErrVerificationConfigInvalid, errors.New("Config can not be nil"))
@@ -131,7 +132,7 @@ func (v *TiDBVerification) runVerify(ctx context.Context) {
 				zap.String("changefeed", v.config.ChangefeedID),
 				zap.String("startTs", startTs),
 				zap.String("endTs", endTs),
-				zap.Bool("stop now", enoughCheck))
+				zap.Bool("enoughCheck", enoughCheck))
 
 			if !enoughCheck {
 				err = v.moduleVerification.Verify(ctx, startTs, endTs)

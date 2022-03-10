@@ -55,7 +55,7 @@ type ModuleVerifier interface {
 	SentTrackData(ctx context.Context, module Module, data []TrackData)
 	// Verify run the module level consistency check base on the time range [startTs, endTs]
 	Verify(ctx context.Context, startTs, endTs string) error
-	// GC clan the used trackData
+	// GC clean the checked trackData
 	GC(endTs string) error
 	// Close clean related resource
 	Close() error
@@ -127,13 +127,6 @@ func NewModuleVerification(ctx context.Context, cfg *ModuleVerificationConfig) (
 	return m, nil
 }
 
-func checkOrder(module Module) bool {
-	if module == Sorter || module == Sink {
-		return true
-	}
-	return false
-}
-
 var (
 	preTsList = map[string]uint64{}
 	preLock   sync.RWMutex
@@ -153,6 +146,7 @@ func (m *ModuleVerification) SentTrackData(ctx context.Context, module Module, d
 	default:
 	}
 
+	// wait for commit complete
 	if m.committing.Load() {
 		m.commitMu.Lock()
 		m.commitMu.Unlock()
@@ -179,6 +173,9 @@ func (m *ModuleVerification) SentTrackData(ctx context.Context, module Module, d
 					zap.String("changefeed", m.cfg.ChangeFeedID))
 			}
 			preTs = datum.CommitTs
+			preLock.Lock()
+			preTsList[tsKey] = preTs
+			preLock.Unlock()
 		}
 
 		key := encodeKey(module, datum.CommitTs, datum.TrackID)
@@ -187,13 +184,18 @@ func (m *ModuleVerification) SentTrackData(ctx context.Context, module Module, d
 		if len(m.wb.Repr()) >= size {
 			m.commitData()
 		}
-
-		if checkOrder(module) {
-			preLock.Lock()
-			preTsList[tsKey] = preTs
-			preLock.Unlock()
-		}
 	}
+}
+
+func (m *ModuleVerification) generatePreTsKey(module Module) string {
+	return fmt.Sprintf("%s_%d", m.cfg.ChangeFeedID, module)
+}
+
+func checkOrder(module Module) bool {
+	if module == Sorter || module == Sink {
+		return true
+	}
+	return false
 }
 
 func (m *ModuleVerification) commitData() {
@@ -233,11 +235,7 @@ func decodeKey(key []byte) (Module, uint64, []byte) {
 	return Module(module), commitTs, k
 }
 
-func (m *ModuleVerification) generatePreTsKey(module Module) string {
-	return fmt.Sprintf("%s_%d", m.cfg.ChangeFeedID, module)
-}
-
-// Verify implement Verify api, only verify data is not lost during transformation.
+// Verify implement Verify api, only verify data is not lost during transfer.
 // the data transfer: puller -> sorter -> (cyclic) -> sink
 func (m *ModuleVerification) Verify(ctx context.Context, startTs, endTs string) error {
 	select {
@@ -246,8 +244,8 @@ func (m *ModuleVerification) Verify(ctx context.Context, startTs, endTs string) 
 	default:
 	}
 
+	// commit before check
 	m.commitData()
-
 	ret := m.moduleDataEqual(Puller, Sink, startTs, endTs)
 	if ret {
 		log.Info("module verify pass",
@@ -274,7 +272,6 @@ func (m *ModuleVerification) Verify(ctx context.Context, startTs, endTs string) 
 	return err
 }
 
-// TODO: delete when gc
 func (m *ModuleVerification) deleteTrackData(endTs string) error {
 	m.deleteCount++
 	ts, err := strconv.ParseUint(endTs, 10, 64)
@@ -287,6 +284,7 @@ func (m *ModuleVerification) deleteTrackData(endTs string) error {
 	return cerror.WrapError(cerror.ErrPebbleDBError, err)
 }
 
+// GC implement GC api
 func (m *ModuleVerification) GC(endTs string) error {
 	err := m.deleteTrackData(endTs)
 	if err != nil {
@@ -298,6 +296,7 @@ func (m *ModuleVerification) GC(endTs string) error {
 		return nil
 	}
 
+	// cover the entire key range
 	start, end := []byte{0x0}, bytes.Repeat([]byte{0xff}, 128)
 	err = m.db.Compact(start, end)
 	if err != nil {
@@ -373,6 +372,7 @@ func keyEqual(key1, key2 []byte) bool {
 	return false
 }
 
+// Close implement the Close api
 func (m *ModuleVerification) Close() error {
 	return cerror.WrapError(cerror.ErrPebbleDBError, m.db.Close())
 }
