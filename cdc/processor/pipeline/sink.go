@@ -107,11 +107,17 @@ func (n *sinkNode) Status() TableStatus    { return n.status.Load() }
 func (n *sinkNode) Init(ctx pipeline.NodeContext) error {
 	n.replicaConfig = ctx.ChangefeedVars().Info.Config
 	n.initWithReplicaConfig(false, ctx.ChangefeedVars().Info.Config)
-	v, err := verification.NewModuleVerification(context.Background(), &verification.ModuleVerificationConfig{ChangeFeedID: ctx.ChangefeedVars().ID})
-	if err != nil {
-		log.Error("newModuleVerification fail", zap.String("changefeed", ctx.ChangefeedVars().ID), zap.Error(err), zap.String("module", "sink"))
+	if ctx.ChangefeedVars().Info.SyncPointEnabled {
+		v, err := verification.NewModuleVerification(context.Background(),
+			&verification.ModuleVerificationConfig{
+				ChangeFeedID: ctx.ChangefeedVars().ID,
+				CyclicEnable: ctx.ChangefeedVars().Info.Config.Cyclic.IsEnabled(),
+			})
+		if err != nil {
+			log.Error("newModuleVerification fail", zap.String("changefeed", ctx.ChangefeedVars().ID), zap.Error(err), zap.String("module", "sink"))
+		}
+		n.verifier = v
 	}
-	n.verifier = v
 	return nil
 }
 
@@ -217,8 +223,9 @@ func (n *sinkNode) addRowToBuffer(ctx context.Context, event *model.PolymorphicE
 	} else {
 		n.rowBuffer = append(n.rowBuffer, event.Row)
 	}
-
-	n.verifier.SentTrackData(ctx, verification.Sink, []verification.TrackData{{TrackID: string(event.TrackID), CommitTs: event.CRTs}})
+	if n.verifier != nil {
+		n.verifier.SentTrackData(ctx, verification.Sink, []verification.TrackData{{TrackID: event.TrackID, CommitTs: event.CRTs}})
+	}
 	if len(n.rowBuffer) >= defaultSyncResolvedBatch {
 		if err := n.emitRowToSink(ctx); err != nil {
 			return errors.Trace(err)

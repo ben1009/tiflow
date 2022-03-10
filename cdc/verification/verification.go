@@ -31,8 +31,9 @@ import (
 )
 
 type Verifier interface {
-	// Verify run the e2e consistency check, return the (startTs, endTs] time range of broken data, if check fail
-	Verify(ctx context.Context) (string, string, error)
+	// Verify run the e2e consistency check, return false and the (startTs, endTs] time range of broken data, if check fail
+	// return true means no need to run next step, endTs is returned for GC
+	Verify(ctx context.Context) (bool, string, string, error)
 	// Close stop the verify process
 	Close() error
 }
@@ -102,7 +103,7 @@ func NewVerification(ctx context.Context, config *Config) error {
 func (v *TiDBVerification) runVerify(ctx context.Context) {
 	// in case run verify at the same if have multiple changefeed created
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	ticker := time.NewTicker(v.config.CheckInterval + time.Duration(r.Int63n(int64(time.Minute))))
+	ticker := time.NewTicker(v.config.CheckInterval + time.Duration(r.Int63n(int64(v.config.CheckInterval/4))))
 	defer ticker.Stop()
 
 	for {
@@ -117,29 +118,33 @@ func (v *TiDBVerification) runVerify(ctx context.Context) {
 		case <-ticker.C:
 			// TODO:
 			// resource limitation cancel https://www.percona.com/doc/percona-toolkit/LATEST/pt-table-checksum.html
-			startTs, endTs, err := v.Verify(ctx)
+			enoughCheck, startTs, endTs, err := v.Verify(ctx)
 			if err != nil {
-				log.Warn("e2e verify fail",
+				log.Warn("run e2e verify error",
 					zap.String("changefeed", v.config.ChangefeedID),
 					zap.String("startTs", startTs),
 					zap.String("endTs", endTs),
 					zap.Error(err))
-
 				return
 			}
-			log.Info("e2e verify ret", zap.String("startTs", startTs), zap.String("endTs", endTs))
-			err = v.moduleVerification.Verify(ctx, startTs, endTs)
-			if err != nil {
-				log.Warn("module level verify fail",
-					zap.String("changefeed", v.config.ChangefeedID),
-					zap.String("startTs", startTs),
-					zap.String("endTs", endTs),
-					zap.Error(err))
+			log.Info("e2e verify ret",
+				zap.String("changefeed", v.config.ChangefeedID),
+				zap.String("startTs", startTs),
+				zap.String("endTs", endTs),
+				zap.Bool("stop now", enoughCheck))
 
-				return
+			if !enoughCheck {
+				err = v.moduleVerification.Verify(ctx, startTs, endTs)
+				if err != nil {
+					log.Error("module verify ret",
+						zap.String("changefeed", v.config.ChangefeedID),
+						zap.String("startTs", startTs),
+						zap.String("endTs", endTs),
+						zap.Error(err))
+				}
 			}
 			// just run module level gc, e2e gc is taking care of at syncPoint side
-			err = v.moduleVerification.GC()
+			err = v.moduleVerification.GC(endTs)
 			if err != nil {
 				log.Warn("module level gc fail", zap.Error(err))
 			}
@@ -147,9 +152,12 @@ func (v *TiDBVerification) runVerify(ctx context.Context) {
 	}
 }
 
-func (v *TiDBVerification) Verify(ctx context.Context) (string, string, error) {
+// Verify implement Verify api,
+// if no error, return false and (startTs, endTs] for next step,
+// return true means no need to run next step, endTs is returned for GC
+func (v *TiDBVerification) Verify(ctx context.Context) (bool, string, string, error) {
 	if v.running.Load() {
-		return "", "", nil
+		return true, "", "", nil
 	}
 
 	v.running.Store(true)
@@ -157,17 +165,18 @@ func (v *TiDBVerification) Verify(ctx context.Context) (string, string, error) {
 
 	ts, err := v.getTS(ctx)
 	if err != nil {
-		return "", "", err
+		return false, "", "", err
 	}
 	if ts.result != unchecked {
-		return "", "", nil
+		return true, "", "", nil
 	}
 
 	startTs, endTs := "", ""
+	result := false
 	for ts.result == unchecked {
 		ret, err := v.checkConsistency(ctx, ts)
 		if err != nil {
-			return "", "", err
+			return false, "", "", err
 		}
 
 		checkRet := checkPass
@@ -176,13 +185,17 @@ func (v *TiDBVerification) Verify(ctx context.Context) (string, string, error) {
 		}
 		err = v.updateCheckResult(ctx, ts, checkRet)
 		if err != nil {
-			return "", "", err
+			return false, "", "", err
 		}
 
-		// if pass no need to run module check, if run from previous set startTs
+		// if pass set result true, sent out endTs for GC
+		// if run from previous set startTs for next step
 		if checkRet == checkPass {
 			if endTs != "" {
 				startTs = ts.primaryTs
+			} else {
+				endTs = ts.primaryTs
+				result = true
 			}
 			break
 		}
@@ -193,26 +206,24 @@ func (v *TiDBVerification) Verify(ctx context.Context) (string, string, error) {
 				endTs = ts.primaryTs
 				break
 			}
-			return "", "", err
+			return false, "", "", err
 		}
 
 		// if previous check pass run module check.
-		// if fail means already run module check last time, skip by return empty startTs, endTs.
+		// if fail means already run module check last time, skip by return endTs for GC.
 		// if unchecked, run e2e check against previous.
 		if preTs.result == checkPass {
 			startTs = preTs.primaryTs
-			endTs = ts.primaryTs
 		}
 		if preTs.result == checkFail {
-			startTs, endTs = "", ""
+			startTs = ""
+			result = true
 		}
-		if preTs.result == unchecked {
-			endTs = ts.primaryTs
-		}
+		endTs = ts.primaryTs
 		ts = preTs
 	}
 
-	return startTs, endTs, nil
+	return result, startTs, endTs, nil
 }
 
 func (v *TiDBVerification) checkConsistency(ctx context.Context, t tsPair) (bool, error) {

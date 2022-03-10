@@ -526,6 +526,11 @@ error = '''
 meta not exists in region
 '''
 
+["CDC:ErrModuleVerificationFail"]
+error = '''
+module level verification fail: module %s
+'''
+
 ["CDC:ErrMySQLConnectionError"]
 error = '''
 MySQL connection error
@@ -643,7 +648,7 @@ etcd api call error
 
 ["CDC:ErrPebbleDBError"]
 error = '''
-leveldb error: %s
+pebbledb error
 '''
 
 ["CDC:ErrPeerMessageClientClosed"]

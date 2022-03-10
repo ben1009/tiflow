@@ -96,9 +96,14 @@ func (n *sorterNode) start(ctx pipeline.NodeContext, isTableActorMode bool, eg *
 	n.eg = eg
 	stdCtx, cancel := context.WithCancel(ctx)
 	n.cancel = cancel
-	verifier, err := verification.NewModuleVerification(stdCtx, &verification.ModuleVerificationConfig{ChangeFeedID: ctx.ChangefeedVars().ID})
-	if err != nil {
-		log.Error("newModuleVerification fail", zap.String("changefeed", ctx.ChangefeedVars().ID), zap.Error(err), zap.String("module", "sorter"))
+	syncPointEnabled := ctx.ChangefeedVars().Info.SyncPointEnabled
+	var verifier verification.ModuleVerifier
+	if syncPointEnabled {
+		var err error
+		verifier, err = verification.NewModuleVerification(stdCtx, &verification.ModuleVerificationConfig{ChangeFeedID: ctx.ChangefeedVars().ID, CyclicEnable: ctx.ChangefeedVars().Info.Config.Cyclic.IsEnabled()})
+		if err != nil {
+			log.Error("newModuleVerification fail", zap.String("changefeed", ctx.ChangefeedVars().ID), zap.Error(err), zap.String("module", "sorter"))
+		}
 	}
 
 	var eventSorter sorter.EventSorter
@@ -235,7 +240,9 @@ func (n *sorterNode) start(ctx pipeline.NodeContext, isTableActorMode bool, eg *
 					lastSentResolvedTs = msg.CRTs
 					lastSendResolvedTsTime = time.Now()
 				}
-				verifier.SentTrackData(stdCtx, verification.Sorter, []verification.TrackData{{TrackID: string(msg.TrackID), CommitTs: msg.CRTs}})
+				if syncPointEnabled {
+					verifier.SentTrackData(stdCtx, verification.Sorter, []verification.TrackData{{TrackID: msg.TrackID, CommitTs: msg.CRTs}})
+				}
 				ctx.SendToNextNode(pipeline.PolymorphicEventMessage(msg))
 			}
 		}

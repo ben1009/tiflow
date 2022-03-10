@@ -55,15 +55,21 @@ func newCyclicMarkNode(markTableID model.TableID) *cyclicMarkNode {
 }
 
 func (n *cyclicMarkNode) Init(ctx pipeline.NodeContext) error {
-	return n.InitTableActor(ctx.ChangefeedVars().Info.Config.Cyclic.ReplicaID, ctx.ChangefeedVars().Info.Config.Cyclic.FilterReplicaID, false, ctx.ChangefeedVars().ID)
+	return n.InitTableActor(ctx.ChangefeedVars().Info.Config.Cyclic.ReplicaID,
+		ctx.ChangefeedVars().Info.Config.Cyclic.FilterReplicaID,
+		false,
+		ctx.ChangefeedVars().Info.SyncPointEnabled,
+		ctx.ChangefeedVars().ID)
 }
 
-func (n *cyclicMarkNode) InitTableActor(localReplicaID uint64, filterReplicaID []uint64, isTableActorMode bool, changefeedID string) error {
-	verifier, err := verification.NewModuleVerification(context.Background(), &verification.ModuleVerificationConfig{ChangeFeedID: changefeedID})
-	if err != nil {
-		log.Error("newModuleVerification fail", zap.String("changefeed", changefeedID), zap.Error(err), zap.String("module", "cyclic"))
+func (n *cyclicMarkNode) InitTableActor(localReplicaID uint64, filterReplicaID []uint64, isTableActorMode, syncPointEnabled bool, changefeedID string) error {
+	if syncPointEnabled {
+		verifier, err := verification.NewModuleVerification(context.Background(), &verification.ModuleVerificationConfig{ChangeFeedID: changefeedID, CyclicEnable: true})
+		if err != nil {
+			log.Error("newModuleVerification fail", zap.String("changefeed", changefeedID), zap.Error(err), zap.String("module", "cyclic"))
+		}
+		n.verifier = verifier
 	}
-	n.verifier = verifier
 	n.localReplicaID = localReplicaID
 	n.filterReplicaID = make(map[uint64]struct{})
 	for _, rID := range filterReplicaID {
@@ -178,7 +184,11 @@ func (n *cyclicMarkNode) sendNormalRowEventToNextNode(ctx pipeline.NodeContext, 
 	}
 	for _, event := range events {
 		event.Row.ReplicaID = replicaID
-		n.verifier.SentTrackData(context.Background(), verification.Cyclic, []verification.TrackData{{TrackID: string(event.TrackID), CommitTs: event.CRTs}})
+		if n.verifier != nil {
+			n.verifier.SentTrackData(context.Background(),
+				verification.Cyclic,
+				[]verification.TrackData{{TrackID: event.TrackID, CommitTs: event.CRTs}})
+		}
 		ctx.SendToNextNode(pipeline.PolymorphicEventMessage(event))
 	}
 }

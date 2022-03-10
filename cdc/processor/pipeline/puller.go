@@ -73,9 +73,19 @@ func (n *pullerNode) start(ctx pipeline.NodeContext, wg *errgroup.Group, isActor
 	ctxC = util.PutTableInfoInCtx(ctxC, n.tableID, n.tableName)
 	ctxC = util.PutCaptureAddrInCtx(ctxC, ctx.GlobalVars().CaptureInfo.AdvertiseAddr)
 	ctxC = util.PutChangefeedIDInCtx(ctxC, ctx.ChangefeedVars().ID)
-	verifier, err := verification.NewModuleVerification(ctxC, &verification.ModuleVerificationConfig{ChangeFeedID: n.changefeed})
-	if err != nil {
-		log.Error("newModuleVerification fail", zap.String("changefeed", n.changefeed), zap.Error(err), zap.String("module", "puller"))
+	syncPointEnabled := ctx.ChangefeedVars().Info.SyncPointEnabled
+	var verifier verification.ModuleVerifier
+	if syncPointEnabled {
+		var err error
+		verifier, err = verification.NewModuleVerification(ctxC,
+			&verification.ModuleVerificationConfig{
+				ChangeFeedID: n.changefeed,
+				CyclicEnable: ctx.ChangefeedVars().Info.Config.Cyclic.IsEnabled(),
+			})
+
+		if err != nil {
+			log.Error("newModuleVerification fail", zap.String("changefeed", n.changefeed), zap.Error(err), zap.String("module", "puller"))
+		}
 	}
 	// NOTICE: always pull the old value internally
 	// See also: https://github.com/pingcap/tiflow/issues/2301.
@@ -102,7 +112,9 @@ func (n *pullerNode) start(ctx pipeline.NodeContext, wg *errgroup.Group, isActor
 					continue
 				}
 				pEvent := model.NewPolymorphicEvent(rawKV)
-				verifier.SentTrackData(ctxC, verification.Puller, []verification.TrackData{{TrackID: string(pEvent.TrackID), CommitTs: pEvent.CRTs}})
+				if syncPointEnabled {
+					verifier.SentTrackData(ctxC, verification.Puller, []verification.TrackData{{TrackID: pEvent.TrackID, CommitTs: pEvent.CRTs}})
+				}
 				if isActorMode {
 					sorter.handleRawEvent(ctx, pEvent)
 				} else {
