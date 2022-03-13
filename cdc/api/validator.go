@@ -129,7 +129,8 @@ func verifyCreateChangefeedConfig(
 		State:             model.StateNormal,
 		SyncPointEnabled:  false,
 		SyncPointInterval: 10 * time.Minute,
-		CreatorVersion:    version.ReleaseVersion,
+		// SyncPointUpstreamDSN: changefeedConfig.SinkURI
+		CreatorVersion: version.ReleaseVersion,
 	}
 
 	if !replicaConfig.ForceReplicate && !changefeedConfig.IgnoreIneligibleTable {
@@ -204,10 +205,8 @@ func verifyUpdateChangefeedConfig(ctx context.Context, changefeedConfig model.Ch
 	return newInfo, nil
 }
 
-// VerifyTables catalog tables specified by ReplicaConfig into
-// eligible (has an unique index or primary key) and ineligible tables.
 func VerifyTables(replicaConfig *config.ReplicaConfig, storage tidbkv.Storage, startTs uint64) (ineligibleTables, eligibleTables []model.TableName, err error) {
-	filter, err := filter.NewFilter(replicaConfig)
+	f, err := filter.NewFilter(replicaConfig)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
@@ -221,7 +220,7 @@ func VerifyTables(replicaConfig *config.ReplicaConfig, storage tidbkv.Storage, s
 	}
 
 	for _, tableInfo := range snap.Tables() {
-		if filter.ShouldIgnoreTable(tableInfo.TableName.Schema, tableInfo.TableName.Table) {
+		if f.ShouldIgnoreTable(tableInfo.TableName.Schema, tableInfo.TableName.Table) {
 			continue
 		}
 		// Sequence is not supported yet, TiCDC needs to filter all sequence tables.
